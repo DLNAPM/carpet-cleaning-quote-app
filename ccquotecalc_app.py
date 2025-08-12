@@ -1,199 +1,141 @@
 import re
 
-# --- Pricing Constants ---
-BASE_PRICE = 140.00
-SERVICE_CHARGE = 25.00
-EXTRA_SQFT_RATE = 0.30
-EXTRA_FLOOR_RATE = 25.00
-EXTRA_TIME_RATE = 25.00
-LARGE_ITEM_RATE = 25.00
-AREA_RUG_RATE = 4.00
-PET_TREATMENT_RATE = 75.00
-STAIN_GUARD_RATE = 50.00
-MEMBERSHIP_6MO = 799.00
-MEMBERSHIP_1YR = 1479.00
-BUNDLE_DISCOUNT = 0.10
+def ask_if_missing(data, key, prompt, cast_func=str):
+    if key not in data or data[key] is None:
+        val = input(prompt)
+        if val.strip() != "":
+            data[key] = cast_func(val)
+    return data
 
-REQUIRED_FIELDS = [
-    'miles', 'sqft', 'pet_rooms', 'large_items',
-    'rugs', 'floors', 'hours', 'discount', 'first_time'
-]
+def parse_description(desc):
+    data = {}
+    # Simple keyword matching
+    miles_match = re.search(r"(\d+(\.\d+)?)\s*miles?", desc, re.I)
+    if miles_match: data["miles"] = float(miles_match.group(1))
 
-# --- Parsing Helper ---
-def extract_details(text, details):
-    """Pull out any numbers or known facts from a free-text answer."""
-    # Miles
-    m = re.search(r'(\d+)\s*miles?', text)
-    if m: details['miles'] = float(m.group(1))
-    # Sq ft
-    m = re.search(r'(\d+)\s*sq\s*ft', text)
-    if m: details['sqft'] = float(m.group(1))
-    # Pet rooms
-    m = re.search(r'pet.*?(\d+)\s*room', text)
-    if m: details['pet_rooms'] = int(m.group(1))
-    # Large items
-    m = re.search(r'(\d+)\s*large item', text)
-    if m: details['large_items'] = int(m.group(1))
-    # Floors
-    m = re.search(r'(\d+)\s*floors?', text)
-    if m: details['floors'] = int(m.group(1))
-    # Hours
-    m = re.search(r'(\d*\.?\d+)\s*hour', text)
-    if m: details['hours'] = float(m.group(1))
-    # Discount
-    m = re.search(r'discount.*?\$?(\d*\.?\d+)', text)
-    if m: details['discount'] = float(m.group(1))
-    # Rugs
-    if 'rug' in text.lower():
-        sizes = re.findall(r'(\d*\.?\d+)\s*sq\s*ft', text)
-        if sizes:
-            if 'rugs' not in details: details['rugs'] = []
-            for s in sizes:
-                size_val = float(s)
-                if 'sqft' not in details or size_val != details['sqft']:
-                    details['rugs'].append(size_val)
-    # First time / repeat
-    if 'first-time' in text.lower(): details['first_time'] = True
-    if 'repeat' in text.lower(): details['first_time'] = False
-    return details
+    sqft_match = re.search(r"(\d+(\.\d+)?)\s*sq\.?\s*ft", desc, re.I)
+    if sqft_match: data["sqft"] = float(sqft_match.group(1))
 
-# --- Quote Calculation ---
-def calc_quote(details, stain_rooms, membership, uv_light, sofa_clean):
-    breakdown = []
-    total = 0
+    large_items_match = re.search(r"(\d+)\s+large\s+items?", desc, re.I)
+    if large_items_match: data["large_items"] = int(large_items_match.group(1))
 
-    breakdown.append(("Base Price (Standard)", BASE_PRICE)); total += BASE_PRICE
-    breakdown.append(("Service Charge (Standard)", SERVICE_CHARGE)); total += SERVICE_CHARGE
+    floors_match = re.search(r"(\d+)\s+floors?", desc, re.I)
+    if floors_match: data["floors"] = int(floors_match.group(1))
 
-    extra_sqft = max(0, details['sqft'] - 500)
-    if extra_sqft > 0:
-        cost = extra_sqft * EXTRA_SQFT_RATE
-        breakdown.append((f"Additional sq ft ({extra_sqft} × ${EXTRA_SQFT_RATE:.2f})", cost))
-        total += cost
+    pet_rooms_match = re.search(r"pet\s+treatment\s+in\s+(\d+)\s+rooms?", desc, re.I)
+    if pet_rooms_match: data["pet_rooms"] = int(pet_rooms_match.group(1))
 
-    extra_floors = max(0, details['floors'] - 1)
-    if extra_floors > 0:
-        cost = extra_floors * EXTRA_FLOOR_RATE
-        breakdown.append((f"Difficulty Access ({extra_floors} extra floor)", cost))
-        total += cost
+    rugs_match = re.findall(r"(\d+(\.\d+)?)\s*sq\.?\s*ft", desc, re.I)
+    if rugs_match and len(rugs_match) > 1:
+        data["rugs"] = [float(r[0]) for r in rugs_match[1:]]
 
-    extra_half_hours = max(0, (details['hours'] - 2) * 2)
-    if extra_half_hours > 0:
-        cost = extra_half_hours * EXTRA_TIME_RATE
-        breakdown.append((f"Extra cleaning time ({extra_half_hours} × 30min)", cost))
-        total += cost
+    time_match = re.search(r"(\d+(\.\d+)?)\s*hours?", desc, re.I)
+    if time_match: data["hours"] = float(time_match.group(1))
 
-    if details['large_items'] > 0:
-        cost = details['large_items'] * LARGE_ITEM_RATE
-        breakdown.append((f"Large item manipulation (count={details['large_items']})", cost))
-        total += cost
+    return data
 
-    rug_total_sqft = sum(details.get('rugs', []))
-    if rug_total_sqft > 0:
-        cost = rug_total_sqft * AREA_RUG_RATE
-        breakdown.append((f"Area rug cleaning ({rug_total_sqft} sq ft × ${AREA_RUG_RATE:.2f})", cost))
-        total += cost
-
-    if details['pet_rooms'] > 0:
-        cost = details['pet_rooms'] * PET_TREATMENT_RATE
-        breakdown.append((f"Pet odor treatment ({details['pet_rooms']} rooms × ${PET_TREATMENT_RATE:.2f})", cost))
-        total += cost
-
-    if stain_rooms > 0:
-        cost = stain_rooms * STAIN_GUARD_RATE
-        breakdown.append((f"Stain guard ({stain_rooms} rooms × ${STAIN_GUARD_RATE:.2f})", cost))
-        total += cost
-
-    if membership == 'y':
-        breakdown.append(("6-Month Membership Program", MEMBERSHIP_6MO))
-        total += MEMBERSHIP_6MO
-    elif membership == 'a':
-        breakdown.append(("1-Year Membership Program", MEMBERSHIP_1YR))
-        total += MEMBERSHIP_1YR
-
-    bundle_services = sum([
-        rug_total_sqft > 0,
-        stain_rooms > 0,
-        details['sqft'] > 0
-    ])
-    if bundle_services >= 3:
-        discount_amt = total * BUNDLE_DISCOUNT
-        breakdown.append((f"Bundle discount ({BUNDLE_DISCOUNT*100:.0f}% off)", -discount_amt))
-        total -= discount_amt
-
-    if details['discount'] > 0:
-        breakdown.append(("Additional discount", -details['discount']))
-        total -= details['discount']
-
-    return breakdown, total
-
-# --- Continuous Listening Conversation ---
-def conversation():
-    details = {}
-    print("Hi! Let’s build a carpet cleaning quote.")
-    print("Tell me details in any order — I’ll keep listening until I have everything.")
-    print("When you're done, say 'done'.")
-
-    while True:
-        # Check if we have all required fields
-        missing = [f for f in REQUIRED_FIELDS if f not in details]
-        if not missing:
-            break
-
-        # Ask about something missing
-        if missing:
-            # If this is the first turn, just ask open-ended
-            if not details:
-                user_input = input("You: ")
-            else:
-                # Ask specifically about the next missing detail
-                if missing[0] == 'miles':
-                    user_input = input("How far is the client in miles? ")
-                elif missing[0] == 'sqft':
-                    user_input = input("How many square feet of carpet? ")
-                elif missing[0] == 'pet_rooms':
-                    user_input = input("How many rooms need pet treatment? ")
-                elif missing[0] == 'large_items':
-                    user_input = input("How many large items to move (>50 lbs)? ")
-                elif missing[0] == 'rugs':
-                    user_input = input("Any rugs to clean? Give sizes in sq ft (comma separated) or 'no': ")
-                    if user_input.lower().startswith('n'):
-                        details['rugs'] = []
-                        continue
-                elif missing[0] == 'floors':
-                    user_input = input("How many floors will we clean? ")
-                elif missing[0] == 'hours':
-                    user_input = input("Total estimated hours for the job? ")
-                elif missing[0] == 'discount':
-                    user_input = input("Any discount amount in dollars? (0 if none) ")
-                elif missing[0] == 'first_time':
-                    user_input = input("Is this a first-time customer? (y/n): ")
-
-            if user_input.lower() == 'done':
-                break
-
-            details = extract_details(user_input, details)
-
-    # Extras
-    stain_rooms = int(input("How many rooms want stain-guard? (0 if none) ") or "0")
-    membership = input("Membership program? (y=6mo, a=1yr, n=none): ").lower()
-    uv_light = input("Would they like a UV light check? (y/n): ").lower() == 'y'
-    sofa_clean = input("Shall we also clean the sofa? (y/n): ").lower() == 'y'
-
-    # Show quote
-    breakdown, total = calc_quote(details, stain_rooms, membership, uv_light, sofa_clean)
-
-    print("\nDetailed Estimate:")
-    print("-" * 50)
-    for name, cost in breakdown:
-        print(f"{name:<45} ${cost:,.2f}")
-    print("-" * 50)
-    print(f"Grand Total: {total:>35,.2f}")
-
+def print_quote(breakdown, total, discount_summary, upsell_responses):
+    print("\n" + "-" * 60)
+    print(f"{'Service Description':<45}{'Price (USD)':>15}")
+    print("-" * 60)
+    for desc, price in breakdown:
+        print(f"{desc:<45}${price:>14.2f}")
+    print("-" * 60)
+    print(f"{'GRAND TOTAL:':<45}${total:>14.2f}")
+    print("-" * 60)
+    print("\nDiscount summary:", discount_summary)
     print("\nUpsell Responses:")
-    print(f"- UV light check → {'Accepted' if uv_light else 'Declined'}")
-    print(f"- Sofa cleaning → {'Accepted' if sofa_clean else 'Declined'}")
+    for q, r in upsell_responses.items():
+        print(f"- {q} → {r}")
 
-# Run
+def main():
+    print("Welcome to the Carpet Cleaning Quick Quote Calculator!")
+    try:
+        desc = input("Describe the job (or press Enter to answer step-by-step): ")
+    except EOFError:
+        desc = ""  # For Render or environments without live input
+
+    data = parse_description(desc)
+
+    # Ask for missing info
+    data = ask_if_missing(data, "miles", "Client distance (miles): ", float)
+    data = ask_if_missing(data, "sqft", "Total carpet area (sq ft): ", float)
+    data = ask_if_missing(data, "large_items", "Number of large items: ", int)
+    data = ask_if_missing(data, "floors", "Number of floors: ", int)
+    data = ask_if_missing(data, "pet_rooms", "Pet treatment in how many rooms: ", int)
+    if "rugs" not in data:
+        rug_count = input("How many rugs?: ")
+        if rug_count.strip():
+            rugs = []
+            for i in range(int(rug_count)):
+                rugs.append(float(input(f"Size of rug {i+1} (sq ft): ")))
+            data["rugs"] = rugs
+    data = ask_if_missing(data, "hours", "Estimated hours for the job: ", float)
+
+    # Pricing rules
+    breakdown = []
+    breakdown.append(("Base Price (Standard)", 140.00))
+    breakdown.append(("Service Charge (Standard)", 25.00))
+
+    extra_sqft = max(0, data["sqft"] - 500)
+    if extra_sqft > 0:
+        breakdown.append((f"Additional sq ft ({extra_sqft} × $0.30)", extra_sqft * 0.30))
+
+    if data["floors"] > 1:
+        breakdown.append((f"Difficulty Access ({data['floors']-1} extra floors)", (data["floors"] - 1) * 25))
+
+    extra_time = max(0, data["hours"] - 2)  # First 2 hours included
+    if extra_time > 0:
+        breakdown.append((f"Extra cleaning time ({extra_time:.1f} hr × $25/hr)", extra_time * 25))
+
+    if data["large_items"] > 0:
+        breakdown.append((f"Large item manipulation (count={data['large_items']})", data["large_items"] * 25))
+
+    if "rugs" in data and data["rugs"]:
+        total_rug_area = sum(data["rugs"])
+        breakdown.append((f"Area rug cleaning ({total_rug_area} sq ft × $4.00)", total_rug_area * 4.00))
+
+    if data["pet_rooms"] > 0:
+        breakdown.append((f"Pet odor treatment ({data['pet_rooms']} rooms × $75.00)", data["pet_rooms"] * 75.00))
+
+    # Upsells
+    stain_guard_rooms = input("Number of rooms for stain-guard (0 if none): ")
+    if stain_guard_rooms.strip() and int(stain_guard_rooms) > 0:
+        breakdown.append((f"Stain guard ({int(stain_guard_rooms)} rooms × $50.00)", int(stain_guard_rooms) * 50))
+
+    membership_choice = input("Membership program (y=6mo / a=1yr / n=none): ").lower()
+    if membership_choice == "y":
+        breakdown.append(("6-Month Membership Program", 789.00))
+    elif membership_choice == "a":
+        breakdown.append(("1-Year Membership Program", 1479.00))
+
+    # Bundle discount
+    services = [d[0] for d in breakdown]
+    discount_summary = ""
+    total_price = sum(price for _, price in breakdown)
+    if any("carpet" in s.lower() for s in services) and any("rugs" in s.lower() or "rug" in s.lower() for s in services) and any("stain guard" in s.lower() for s in services):
+        discount = total_price * 0.10
+        breakdown.append(("Bundle discount (10% off)", -discount))
+        discount_summary += f"Bundle discount applied: 10% off, saving ${discount:.2f}. "
+
+    # Additional discount
+    extra_discount = input("Additional discount amount (leave blank if none): ")
+    if extra_discount.strip():
+        breakdown.append(("Additional discount", -float(extra_discount)))
+        discount_summary += f"Additional discount applied: saving ${float(extra_discount):.2f}."
+
+    # Upsell questions
+    upsell_responses = {}
+    uv_choice = input("Show visible stains with UV light? (y/n): ").lower()
+    upsell_responses["UV light inspection"] = "Accepted" if uv_choice == "y" else "Declined"
+    sofa_choice = input("Clean sofa as well? (y/n): ").lower()
+    upsell_responses["Sofa cleaning"] = "Accepted" if sofa_choice == "y" else "Declined"
+
+    # Final total
+    final_total = sum(price for _, price in breakdown)
+
+    # Print results in nice table
+    print_quote(breakdown, final_total, discount_summary, upsell_responses)
+
 if __name__ == "__main__":
-    conversation()
+    main()
