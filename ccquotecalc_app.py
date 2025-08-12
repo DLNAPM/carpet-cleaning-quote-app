@@ -1,10 +1,11 @@
-# ccquotecalc_app.py
-from flask import Flask, request, jsonify, render_template_string
-import os, re
+# ccquotecalc_cli.py
+import re
+import os
+import sys
+import json
+import argparse
 
-app = Flask(__name__)
-
-# Pricing constants (same as earlier)
+# Pricing constants (same as before)
 BASE_PRICE = 140.00
 SERVICE_CHARGE = 25.00
 EXTRA_SQFT_RATE = 0.30
@@ -23,10 +24,11 @@ REQUIRED_FIELDS = [
     'rugs', 'floors', 'hours', 'discount', 'first_time'
 ]
 
-# Parsing helpers (same rules)
+# Parsing helpers
 def parse_description(desc, details):
     if not desc:
         return details
+    # same pattern matches as previous versions
     m = re.search(r'(\d+)\s*miles?', desc)
     if m: details['miles'] = float(m.group(1))
     m = re.search(r'(\d+)\s*sq\s*ft', desc)
@@ -47,6 +49,7 @@ def parse_description(desc, details):
             details.setdefault('rugs', [])
             for s in sizes:
                 v = float(s)
+                # avoid matching main carpet sqft twice
                 if details.get('sqft') is None or v != details['sqft']:
                     details['rugs'].append(v)
     if 'first-time' in desc.lower() or 'first time' in desc.lower(): details['first_time'] = True
@@ -54,132 +57,174 @@ def parse_description(desc, details):
     return details
 
 def calc_quote(details, stain_rooms=0, membership='n'):
-    breakdown = []; total = 0.0
+    breakdown = []
+    total = 0.0
     breakdown.append(("Base Price (Standard)", BASE_PRICE)); total += BASE_PRICE
     breakdown.append(("Service Charge (Standard)", SERVICE_CHARGE)); total += SERVICE_CHARGE
+
     extra_sqft = max(0, details['sqft'] - 500)
     if extra_sqft > 0:
-        c = extra_sqft * EXTRA_SQFT_RATE
-        breakdown.append((f"Additional sq ft ({extra_sqft} × ${EXTRA_SQFT_RATE:.2f})", c)); total += c
+        cost = extra_sqft * EXTRA_SQFT_RATE
+        breakdown.append((f"Additional sq ft ({extra_sqft} × ${EXTRA_SQFT_RATE:.2f})", cost))
+        total += cost
+
     extra_floors = max(0, details['floors'] - 1)
     if extra_floors > 0:
-        c = extra_floors * EXTRA_FLOOR_RATE
-        breakdown.append((f"Difficulty Access ({extra_floors} extra floor)", c)); total += c
+        cost = extra_floors * EXTRA_FLOOR_RATE
+        breakdown.append((f"Difficulty Access ({extra_floors} extra floor)", cost))
+        total += cost
+
     extra_half_hours = max(0, (details['hours'] - 2) * 2)
     if extra_half_hours > 0:
-        c = extra_half_hours * EXTRA_TIME_RATE
-        breakdown.append((f"Extra cleaning time ({extra_half_hours} × 30min)", c)); total += c
+        cost = extra_half_hours * EXTRA_TIME_RATE
+        breakdown.append((f"Extra cleaning time ({extra_half_hours} × 30min)", cost))
+        total += cost
+
     if details['large_items'] > 0:
-        c = details['large_items'] * LARGE_ITEM_RATE
-        breakdown.append((f"Large item manipulation (count={details['large_items']})", c)); total += c
+        cost = details['large_items'] * LARGE_ITEM_RATE
+        breakdown.append((f"Large item manipulation (count={details['large_items']})", cost))
+        total += cost
+
     rug_total_sqft = sum(details.get('rugs', []))
     if rug_total_sqft > 0:
-        c = rug_total_sqft * AREA_RUG_RATE
-        breakdown.append((f"Area rug cleaning ({rug_total_sqft} sq ft × ${AREA_RUG_RATE:.2f})", c)); total += c
+        cost = rug_total_sqft * AREA_RUG_RATE
+        breakdown.append((f"Area rug cleaning ({rug_total_sqft} sq ft × ${AREA_RUG_RATE:.2f})", cost))
+        total += cost
+
     if details['pet_rooms'] > 0:
-        c = details['pet_rooms'] * PET_TREATMENT_RATE
-        breakdown.append((f"Pet odor treatment ({details['pet_rooms']} rooms × ${PET_TREATMENT_RATE:.2f})", c)); total += c
+        cost = details['pet_rooms'] * PET_TREATMENT_RATE
+        breakdown.append((f"Pet odor treatment ({details['pet_rooms']} rooms × ${PET_TREATMENT_RATE:.2f})", cost))
+        total += cost
+
     if stain_rooms > 0:
-        c = stain_rooms * STAIN_GUARD_RATE
-        breakdown.append((f"Stain guard ({stain_rooms} rooms × ${STAIN_GUARD_RATE:.2f})", c)); total += c
+        cost = stain_rooms * STAIN_GUARD_RATE
+        breakdown.append((f"Stain guard ({stain_rooms} rooms × ${STAIN_GUARD_RATE:.2f})", cost))
+        total += cost
+
     if membership == 'y':
         breakdown.append(("6-Month Membership Program", MEMBERSHIP_6MO)); total += MEMBERSHIP_6MO
     elif membership == 'a':
         breakdown.append(("1-Year Membership Program", MEMBERSHIP_1YR)); total += MEMBERSHIP_1YR
+
     bundle_services = sum([rug_total_sqft > 0, stain_rooms > 0, details['sqft'] > 0])
     if bundle_services >= 3:
         bd = total * BUNDLE_DISCOUNT
         breakdown.append((f"Bundle discount ({BUNDLE_DISCOUNT*100:.0f}% off)", -bd)); total -= bd
-    if details.get('discount', 0) > 0:
+
+    if details['discount'] > 0:
         breakdown.append(("Additional discount", -details['discount'])); total -= details['discount']
+
     return breakdown, total
 
-def find_missing(details):
-    miss = [f for f in REQUIRED_FIELDS if f not in details]
-    return miss
+def missing_fields(details):
+    return [f for f in REQUIRED_FIELDS if f not in details]
 
-# Simple HTML page for manual testing
-FORM_HTML = """
-<!doctype html>
-<title>Carpet Quote</title>
-<h3>Carpet Cleaning Quick Quote</h3>
-<form method="post" action="/quote">
-  <label>Description (natural language):</label><br>
-  <textarea name="description" rows="4" cols="60">{{description}}</textarea><br>
-  <small>Or submit JSON to /quote as application/json</small><br>
-  <button type="submit">Get quote</button>
-</form>
-"""
+def load_json_file(path):
+    with open(path, 'r') as f:
+        return json.load(f)
 
-@app.route('/', methods=['GET'])
-def index():
-    return render_template_string(FORM_HTML, description='')
+def pretty_print_quote(breakdown, total):
+    print("\nDetailed Estimate:")
+    print("-" * 50)
+    for name, cost in breakdown:
+        print(f"{name:<45} ${cost:,.2f}")
+    print("-" * 50)
+    print(f"Grand Total: {total:>35,.2f}")
 
-@app.route('/quote', methods=['POST'])
-def quote():
-    # Accept JSON or form
-    data = {}
-    if request.is_json:
-        data = request.get_json()
-    else:
-        data = request.form.to_dict()
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--desc', help='Job description (natural language)')
+    parser.add_argument('--json', help='Path to JSON file containing "details" object')
+    parser.add_argument('--stain_rooms', type=int, default=0)
+    parser.add_argument('--membership', choices=['y','a','n'], default='n')
+    args = parser.parse_args()
 
-    # If a "details" dict provided, use it
     details = {}
-    if isinstance(data.get('details'), dict):
-        details.update(data['details'])
 
-    # Parse description if present
-    desc = data.get('description') or data.get('desc') or ""
-    details = parse_description(desc, details)
+    # Priorities: CLI desc -> env JOB_DESC -> JSON file -> interactive
+    desc = args.desc or os.environ.get('JOB_DESC')
+    if args.json:
+        obj = load_json_file(args.json)
+        details.update(obj.get('details', obj))
+    if desc:
+        details = parse_description(desc, details)
 
-    # Accept direct fields via JSON
-    for key in REQUIRED_FIELDS:
-        if key in data and key not in details:
-            details[key] = data[key]
+    # If interactive (tty) continue conversation-like (keeps original behavior)
+    if sys.stdin.isatty():
+        # interactive flow (short)
+        if not details:
+            raw = input("Describe the job (or press Enter to be asked step-by-step): ")
+            details = parse_description(raw, details)
+        # ask missing fields interactively
+        for field in REQUIRED_FIELDS:
+            if field in details:
+                continue
+            if field == 'rugs':
+                raw = input("Any rugs to clean? (enter sizes comma separated or blank for none): ").strip()
+                if raw:
+                    details['rugs'] = [float(s.strip()) for s in raw.split(',') if s.strip()]
+                else:
+                    details['rugs'] = []
+            elif field == 'first_time':
+                v = input("First-time customer? (y/n): ").lower().strip()
+                details['first_time'] = v.startswith('y')
+            else:
+                raw = input(f"{field}? ").strip()
+                if raw == '':
+                    # set safe defaults
+                    if field in ('pet_rooms','large_items','floors'):
+                        details[field] = 0 if field != 'floors' else 1
+                    elif field == 'discount':
+                        details[field] = 0.0
+                    else:
+                        # try to parse
+                        try:
+                            details[field] = float(raw)
+                        except:
+                            details[field] = 0
+                else:
+                    # try best cast: int or float
+                    if field in ('pet_rooms','large_items','floors'):
+                        details[field] = int(float(raw))
+                    elif field == 'rugs':
+                        details['rugs'] = [float(s.strip()) for s in raw.split(',') if s.strip()]
+                    elif field == 'first_time':
+                        details['first_time'] = raw.lower().startswith('y')
+                    elif field == 'discount':
+                        details['discount'] = float(raw)
+                    else:
+                        details[field] = float(raw)
+    else:
+        # Non-interactive: ensure we have at least basic details or explain missing ones
+        if not details:
+            print("Non-interactive run and no description provided. Provide --desc or set JOB_DESC env var or use --json.")
+            print("Example: export JOB_DESC=\"43 miles away, 599 sq ft, pet treatment in 3 rooms, 2 large items, rugs 18,30.5,8\"")
+            sys.exit(2)
+        # Fill missing fields with safe defaults where logical
+        for f in REQUIRED_FIELDS:
+            if f not in details:
+                if f == 'rugs':
+                    details['rugs'] = []
+                elif f == 'floors':
+                    details['floors'] = 1
+                elif f in ('pet_rooms','large_items'):
+                    details[f] = 0
+                elif f == 'discount':
+                    details[f] = 0.0
+                elif f == 'first_time':
+                    details[f] = False
+                else:
+                    # leave sqft and miles required when possible
+                    pass
 
-    # Normalize some fields
-    if 'rugs' in details and isinstance(details['rugs'], str):
-        try:
-            details['rugs'] = [float(x.strip()) for x in details['rugs'].split(',') if x.strip()]
-        except:
-            details['rugs'] = []
-    details.setdefault('rugs', [])
-    details.setdefault('pet_rooms', 0)
-    details.setdefault('large_items', 0)
-    details.setdefault('floors', 1)
-    details.setdefault('discount', 0.0)
-    details.setdefault('hours', 2.0)
-    details.setdefault('first_time', False)
+    # Validate mandatory numeric fields
+    if 'sqft' not in details or 'miles' not in details:
+        print("Missing required numeric fields: ", [f for f in ('sqft','miles') if f not in details])
+        print("Provide them via --desc or JOB_DESC or --json.")
+        sys.exit(3)
 
-    missing = find_missing(details)
-    # If essential numeric fields are missing, return missing list
-    if missing:
-        return jsonify({
-            "status": "need_more_info",
-            "missing": missing,
-            "message": "Provide the missing fields in JSON or include more in 'description'."
-        }), 400
-
-    # Extras
-    stain_rooms = int(data.get('stain_rooms', 0))
-    membership = data.get('membership', 'n')
-    uv = data.get('uv_light', False)
-    sofa = data.get('sofa_clean', False)
-
-    breakdown, total = calc_quote(details, stain_rooms=stain_rooms, membership=membership)
-
-    return jsonify({
-        "status": "ok",
-        "details": details,
-        "breakdown": [{"name": n, "amount": a} for n,a in breakdown],
-        "total": total,
-        "upsells": {
-            "uv_light": bool(uv),
-            "sofa_clean": bool(sofa)
-        }
-    })
+    breakdown, total = calc_quote(details, stain_rooms=args.stain_rooms, membership=args.membership)
+    pretty_print_quote(breakdown, total)
 
 if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    main()
