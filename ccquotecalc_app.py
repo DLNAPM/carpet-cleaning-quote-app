@@ -1,234 +1,308 @@
 from flask import Flask, render_template_string, request
+from io import BytesIO
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-import smtplib, os, io
+import smtplib
 from email.mime.multipart import MIMEMultipart
-from email.mime.application import MIMEApplication
-from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+import os
 
 app = Flask(__name__)
 
-# -----------------------
+# -------------------
+# DEFAULT PREFILLED DATA
+# -------------------
+default_data = {
+    "client_name": "John Doe",
+    "miles": 15,
+    "sq_ft": 900,
+    "pet_rooms": 2,
+    "large_items": 1,
+    "total_rug_sqft": 50,
+    "floors": 2,
+    "hours": 3.0,
+    "stain_guard_rooms": 1,
+    "membership": "n",
+    "discount": 25.00,
+    "recipient_email": "customer@example.com"
+}
+
+# -------------------
 # QUOTE CALCULATION LOGIC
-# -----------------------
+# -------------------
 def calculate_quote(data):
-    rows = []
-    total = 0
-
-    # Base price
     base_price = 140.00
-    rows.append(("Base Price (Standard)", f"${base_price:.2f}"))
-    total += base_price
-
-    # Service charge
     service_charge = 25.00
-    rows.append(("Service Charge (Standard)", f"${service_charge:.2f}"))
+    prices = {
+        "sq_ft_over_800": 0.30,
+        "extra_floor": 25.00,
+        "extra_time_per_30min": 25.00,
+        "large_item": 25.00,
+        "rug_sqft": 4.00,
+        "pet_room": 75.00,
+        "stain_guard": 50.00,
+        "membership_6mo": 799.00,
+        "membership_1yr": 1479.00
+    }
+
+    rows = []
+    total = base_price
+    rows.append(("Base Price (Standard)", base_price))
     total += service_charge
+    rows.append(("Service Charge (Standard)", service_charge))
 
-    # Additional sq ft
-    if data["sq_ft"] > 781:
-        extra_sqft = data["sq_ft"] - 781
-        price_extra = extra_sqft * 0.30
-        rows.append((f"Additional sq ft ({extra_sqft} × $0.30)", f"${price_extra:.2f}"))
-        total += price_extra
+    if data["sq_ft"] > 800:
+        extra_sqft = data["sq_ft"] - 800
+        cost = extra_sqft * prices["sq_ft_over_800"]
+        rows.append((f"Additional sq ft ({extra_sqft} * ${prices['sq_ft_over_800']:.2f})", cost))
+        total += cost
 
-    # Floors
     if data["floors"] > 1:
-        diff_price = (data["floors"] - 1) * 25
-        rows.append((f"Difficulty Access ({data['floors']-1} extra floor)", f"${diff_price:.2f}"))
-        total += diff_price
+        extra_floors = data["floors"] - 1
+        cost = extra_floors * prices["extra_floor"]
+        rows.append((f"Difficulty Access ({extra_floors} extra floor)", cost))
+        total += cost
 
-    # Extra time
-    if data["hours"] > 2.0:
-        extra_time = int((data["hours"] - 2.0) * 2) * 25
-        rows.append((f"Extra cleaning time", f"${extra_time:.2f}"))
-        total += extra_time
+    if data["hours"] > 2:
+        extra_half_hours = int((data["hours"] - 2) / 0.5)
+        cost = extra_half_hours * prices["extra_time_per_30min"]
+        rows.append((f"Extra cleaning time ({extra_half_hours} × 30min)", cost))
+        total += cost
 
-    # Large items
     if data["large_items"] > 0:
-        large_items_price = data["large_items"] * 25
-        rows.append((f"Large item manipulation (count={data['large_items']})", f"${large_items_price:.2f}"))
-        total += large_items_price
+        cost = data["large_items"] * prices["large_item"]
+        rows.append((f"Large item manipulation (count={data['large_items']})", cost))
+        total += cost
 
-    # Rugs
     if data["total_rug_sqft"] > 0:
-        rugs_price = data["total_rug_sqft"] * 4
-        rows.append((f"Area rug cleaning ({data['total_rug_sqft']} sq ft × $4.00)", f"${rugs_price:.2f}"))
-        total += rugs_price
+        cost = data["total_rug_sqft"] * prices["rug_sqft"]
+        rows.append((f"Area rug cleaning ({data['total_rug_sqft']} sq ft × ${prices['rug_sqft']:.2f})", cost))
+        total += cost
 
-    # Pet treatment
     if data["pet_rooms"] > 0:
-        pet_price = data["pet_rooms"] * 75
-        rows.append((f"Pet odor treatment ({data['pet_rooms']} rooms × $75.00)", f"${pet_price:.2f}"))
-        total += pet_price
+        cost = data["pet_rooms"] * prices["pet_room"]
+        rows.append((f"Pet odor treatment ({data['pet_rooms']} rooms × ${prices['pet_room']:.2f})", cost))
+        total += cost
 
-    # Stain guard
     if data["stain_guard_rooms"] > 0:
-        sg_price = data["stain_guard_rooms"] * 50
-        rows.append((f"Stain guard ({data['stain_guard_rooms']} rooms × $50.00)", f"${sg_price:.2f}"))
-        total += sg_price
+        cost = data["stain_guard_rooms"] * prices["stain_guard"]
+        rows.append((f"Stain guard ({data['stain_guard_rooms']} rooms × ${prices['stain_guard']:.2f})", cost))
+        total += cost
 
-    # Membership
     if data["membership"] == "y":
-        mem_price = 789
-        rows.append(("6-Month Membership Program", f"${mem_price:.2f}"))
-        total += mem_price
+        rows.append(("6-Month Membership Program", prices["membership_6mo"]))
+        total += prices["membership_6mo"]
     elif data["membership"] == "a":
-        mem_price = 1479
-        rows.append(("1-Year Membership Program", f"${mem_price:.2f}"))
-        total += mem_price
+        rows.append(("1-Year Membership Program", prices["membership_1yr"]))
+        total += prices["membership_1yr"]
 
-    # Discounts
     if data["discount"] > 0:
-        rows.append(("Additional discount", f"$-{data['discount']:.2f}"))
+        rows.append(("Additional discount", -data["discount"]))
         total -= data["discount"]
 
     return rows, total
 
-# -----------------------
+# -------------------
 # PDF GENERATION
-# -----------------------
-def generate_pdf(client_name, rows, total):
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=letter)
-    y = 750
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(200, y, f"Carpet Cleaning Quote for {client_name}")
-    y -= 40
-    c.setFont("Helvetica", 12)
-    for item, price in rows:
-        c.drawString(50, y, item)
-        c.drawRightString(550, y, price)
+# -------------------
+def generate_pdf(data, rows, total):
+    pdf_buffer = BytesIO()
+    p = canvas.Canvas(pdf_buffer, pagesize=letter)
+    p.setFont("Helvetica", 12)
+    p.drawString(50, 750, f"Carpet Cleaning Quote for {data['client_name']}")
+    p.drawString(50, 730, f"Distance: {data['miles']} miles")
+    p.drawString(50, 710, f"Square Footage: {data['sq_ft']} sq ft")
+
+    y = 680
+    for desc, cost in rows:
+        p.drawString(50, y, f"{desc}")
+        p.drawRightString(550, y, f"${cost:,.2f}")
         y -= 20
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(50, y, "Grand Total:")
-    c.drawRightString(550, y, f"${total:.2f}")
-    c.save()
-    buffer.seek(0)
-    return buffer
 
-# -----------------------
-# EMAIL SENDING
-# -----------------------
-def send_email_with_attachment(to_email, subject, body, pdf_buffer, filename):
+    p.drawString(50, y-10, "-"*60)
+    p.drawString(50, y-30, f"Grand Total:")
+    p.drawRightString(550, y-30, f"${total:,.2f}")
+    p.showPage()
+    p.save()
+    pdf_buffer.seek(0)
+    return pdf_buffer
+
+# -------------------
+# EMAIL PDF
+# -------------------
+def send_email_with_attachment(recipient, pdf_buffer):
+    sender = os.environ.get("SMTP_USERNAME")
+    password = os.environ.get("SMTP_PASSWORD")
+    smtp_server = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
+    smtp_port = int(os.environ.get("SMTP_PORT", 587))
+
+    msg = MIMEMultipart()
+    msg['From'] = sender
+    msg['To'] = recipient
+    msg['Subject'] = "Your Carpet Cleaning Quote"
+
+    part = MIMEBase('application', 'octet-stream')
+    part.set_payload(pdf_buffer.read())
+    encoders.encode_base64(part)
+    part.add_header('Content-Disposition', 'attachment; filename="quote.pdf"')
+    msg.attach(part)
+
     try:
-        msg = MIMEMultipart()
-        msg["From"] = os.environ.get("SMTP_USERNAME")
-        msg["To"] = to_email
-        msg["Subject"] = subject
-
-        msg.attach(MIMEText(body, "plain"))
-
-        part = MIMEApplication(pdf_buffer.read(), Name=filename)
-        part["Content-Disposition"] = f'attachment; filename="{filename}"'
-        msg.attach(part)
-
-        with smtplib.SMTP(os.environ.get("SMTP_SERVER"), int(os.environ.get("SMTP_PORT"))) as server:
-            server.starttls()
-            server.login(os.environ.get("SMTP_USERNAME"), os.environ.get("SMTP_PASSWORD"))
-            server.send_message(msg)
-        return True, "Email sent successfully."
+        server = smtplib.SMTP(smtp_server, smtp_port)
+        server.starttls()
+        server.login(sender, password)
+        server.sendmail(sender, recipient, msg.as_string())
+        server.quit()
+        return True, None
     except Exception as e:
-        return False, f"Failed to send email: {e}"
+        return False, str(e)
 
-# -----------------------
-# HTML TEMPLATE
-# -----------------------
-form_template = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Carpet Cleaning Quick Quote Calculator</title>
-</head>
-<body>
-<h2>Carpet Cleaning Quick Quote Calculator</h2>
-<form method="POST">
-    Client Name: <input type="text" name="client_name" value="{{ data.client_name }}"><br>
-    Distance (miles): <input type="number" step="0.1" name="miles" value="{{ data.miles }}"><br>
-    Sq Ft: <input type="number" name="sq_ft" value="{{ data.sq_ft }}"><br>
-    Pet treatment rooms: <input type="number" name="pet_rooms" value="{{ data.pet_rooms }}"><br>
-    Large items: <input type="number" name="large_items" value="{{ data.large_items }}"><br>
-    Total Rug Sq Ft: <input type="number" step="0.1" name="total_rug_sqft" value="{{ data.total_rug_sqft }}"><br>
-    Floors: <input type="number" name="floors" value="{{ data.floors }}"><br>
-    Hours: <input type="number" step="0.1" name="hours" value="{{ data.hours }}"><br>
-    Stain Guard Rooms: <input type="number" name="stain_guard_rooms" value="{{ data.stain_guard_rooms }}"><br>
-    Membership (n=none, y=6mo, a=1yr): <input type="text" name="membership" value="{{ data.membership }}"><br>
-    Discount: <input type="number" step="0.01" name="discount" value="{{ data.discount }}"><br>
-    Recipient Email (for PDF): <input type="email" name="recipient_email" value="{{ data.recipient_email }}"><br><br>
-
-    <button type="submit" name="action" value="show">Show Quote</button>
-    <button type="submit" name="action" value="email">Email PDF</button>
-    <button type="submit" name="action" value="clear">Clear</button>
-</form>
-
-{% if rows %}
-<h3>Detailed Estimate for {{ data.client_name }}</h3>
-<table border="1" cellpadding="5" cellspacing="0">
-<tr><th>Item</th><th>Price</th></tr>
-{% for item, price in rows %}
-<tr><td>{{ item }}</td><td>{{ price }}</td></tr>
-{% endfor %}
-<tr><th>Grand Total</th><th>${{ "%.2f"|format(total) }}</th></tr>
-</table>
-{% endif %}
-
-{% if message %}
-<p>{{ message }}</p>
-{% endif %}
-</body>
-</html>
-"""
-
-# -----------------------
-# ROUTES
-# -----------------------
+# -------------------
+# FLASK ROUTES
+# -------------------
 @app.route("/", methods=["GET", "POST"])
-def home():
-    default_data = {
-        "client_name": "",
-        "miles": "",
-        "sq_ft": "",
-        "pet_rooms": "",
-        "large_items": "",
-        "total_rug_sqft": "",
-        "floors": "",
-        "hours": "",
-        "stain_guard_rooms": "",
-        "membership": "",
-        "discount": "",
-        "recipient_email": ""
-    }
+def index():
+    form_data = default_data.copy()
+    rows, total, email_status = None, None, None
 
     if request.method == "POST":
         action = request.form.get("action")
-
         if action == "clear":
-            return render_template_string(form_template, data=default_data, rows=None, total=None, message=None)
+            form_data = {k: "" for k in default_data}
+        else:
+            for k in default_data:
+                val = request.form.get(k)
+                if k in ["miles", "sq_ft", "pet_rooms", "large_items", "total_rug_sqft", "floors", "stain_guard_rooms"]:
+                    try:
+                        form_data[k] = int(val)
+                    except:
+                        form_data[k] = 0
+                elif k in ["hours", "discount"]:
+                    try:
+                        form_data[k] = float(val)
+                    except:
+                        form_data[k] = 0.0
+                else:
+                    form_data[k] = val
 
-        data = {k: request.form.get(k, "") for k in default_data}
-        for key in ["miles", "sq_ft", "pet_rooms", "large_items", "total_rug_sqft", "floors", "hours", "stain_guard_rooms", "discount"]:
-            try:
-                data[key] = float(data[key]) if data[key] else 0
-            except:
-                data[key] = 0
+            rows, total = calculate_quote(form_data)
 
-        rows, total = calculate_quote(data)
+            if action == "email":
+                pdf_buffer = generate_pdf(form_data, rows, total)
+                success, err = send_email_with_attachment(form_data["recipient_email"], pdf_buffer)
+                email_status = "Email sent!" if success else f"Failed to send email: {err}"
 
-        if action == "show":
-            return render_template_string(form_template, data=data, rows=rows, total=total, message=None)
+    return render_template_string(TEMPLATE, data=form_data, rows=rows, total=total, email_status=email_status)
 
-        elif action == "email":
-            pdf_buffer = generate_pdf(data["client_name"], rows, total)
-            success, msg = send_email_with_attachment(
-                data["recipient_email"],
-                f"Carpet Cleaning Quote for {data['client_name']}",
-                "Please find attached your carpet cleaning quote.",
-                pdf_buffer,
-                "quote.pdf"
-            )
-            return render_template_string(form_template, data=data, rows=rows, total=total, message=msg)
-
-    return render_template_string(form_template, data=default_data, rows=None, total=None, message=None)
+# -------------------
+# HTML TEMPLATE WITH DARK THEME
+# -------------------
+TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+    <title>Carpet Cleaning Quick Quote</title>
+    <style>
+        body {
+            background-color: black;
+            color: white;
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            display: flex;
+            padding: 20px;
+        }
+        .form-container {
+            flex: 1;
+            background-color: #001f3f;
+            padding: 20px;
+            border-radius: 10px;
+            margin-right: 20px;
+        }
+        .quote-container {
+            flex: 1;
+            background-color: #001f3f;
+            padding: 20px;
+            border-radius: 10px;
+        }
+        label { display: block; margin-top: 10px; }
+        input, select {
+            width: 100%;
+            padding: 5px;
+            margin-top: 3px;
+            border-radius: 5px;
+            border: none;
+        }
+        .buttons {
+            margin-top: 15px;
+        }
+        button {
+            padding: 10px 15px;
+            margin-right: 5px;
+            border: none;
+            border-radius: 5px;
+            background: linear-gradient(90deg, #0044cc, #0088ff);
+            color: white;
+            cursor: pointer;
+        }
+        table {
+            width: 100%;
+            color: white;
+            border-collapse: collapse;
+        }
+        td {
+            padding: 5px;
+            border-bottom: 1px solid #555;
+        }
+        .total-row {
+            font-weight: bold;
+            border-top: 2px solid white;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="form-container">
+            <h2>Carpet Cleaning Job Details</h2>
+            <form method="post">
+                {% for field, value in data.items() %}
+                    <label>{{ field.replace('_', ' ').title() }}:</label>
+                    <input name="{{field}}" value="{{value}}">
+                {% endfor %}
+                <div class="buttons">
+                    <button type="submit" name="action" value="show">Show Quote</button>
+                    <button type="submit" name="action" value="email">Email PDF</button>
+                    <button type="submit" name="action" value="clear">Clear</button>
+                </div>
+            </form>
+            {% if email_status %}
+                <p>{{email_status}}</p>
+            {% endif %}
+        </div>
+        <div class="quote-container">
+            {% if rows %}
+                <h2>Quote Details</h2>
+                <table>
+                    {% for desc, cost in rows %}
+                        <tr>
+                            <td>{{desc}}</td>
+                            <td style="text-align:right;">${{ "%.2f"|format(cost) }}</td>
+                        </tr>
+                    {% endfor %}
+                    <tr class="total-row">
+                        <td>Grand Total</td>
+                        <td style="text-align:right;">${{ "%.2f"|format(total) }}</td>
+                    </tr>
+                </table>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>
+"""
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
