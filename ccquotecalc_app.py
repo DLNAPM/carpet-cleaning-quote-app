@@ -1,233 +1,234 @@
 from flask import Flask, render_template_string, request
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-from io import BytesIO
-import smtplib
-import os
+import smtplib, os, io
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 from email.mime.text import MIMEText
 
 app = Flask(__name__)
 
-# -------------------------
+# -----------------------
 # QUOTE CALCULATION LOGIC
-# -------------------------
+# -----------------------
 def calculate_quote(data):
-    # Prices
-    base_price = 140.0
-    service_charge = 25.0
-    extra_sqft_rate = 0.30
-    extra_floor_charge = 25.0
-    extra_time_rate = 25.0
-    large_item_charge = 25.0
-    rug_rate = 4.0
-    pet_treatment_rate = 75.0
-    stain_guard_rate = 50.0
-    membership_6mo = 799.0
-    membership_1yr = 1479.0
-    bundle_discount_rate = 0.10
+    rows = []
+    total = 0
 
-    # Calculation
-    results = []
-    total = 0.0
-
-    results.append(("Base Price (Standard)", base_price))
+    # Base price
+    base_price = 140.00
+    rows.append(("Base Price (Standard)", f"${base_price:.2f}"))
     total += base_price
 
-    results.append(("Service Charge (Standard)", service_charge))
+    # Service charge
+    service_charge = 25.00
+    rows.append(("Service Charge (Standard)", f"${service_charge:.2f}"))
     total += service_charge
 
-    if data["sqft"] > 781:
-        extra_sqft = data["sqft"] - 781
-        charge = extra_sqft * extra_sqft_rate
-        results.append((f"Additional sq ft ({extra_sqft} × ${extra_sqft_rate:.2f})", charge))
-        total += charge
+    # Additional sq ft
+    if data["sq_ft"] > 781:
+        extra_sqft = data["sq_ft"] - 781
+        price_extra = extra_sqft * 0.30
+        rows.append((f"Additional sq ft ({extra_sqft} × $0.30)", f"${price_extra:.2f}"))
+        total += price_extra
 
+    # Floors
     if data["floors"] > 1:
-        floors_extra = data["floors"] - 1
-        charge = floors_extra * extra_floor_charge
-        results.append((f"Difficulty Access ({floors_extra} extra floor)", charge))
-        total += charge
+        diff_price = (data["floors"] - 1) * 25
+        rows.append((f"Difficulty Access ({data['floors']-1} extra floor)", f"${diff_price:.2f}"))
+        total += diff_price
 
-    if data["extra_time_hours"] > 0:
-        charge = data["extra_time_hours"] * 2 * extra_time_rate
-        results.append((f"Extra cleaning time ({data['extra_time_hours']} hrs)", charge))
-        total += charge
+    # Extra time
+    if data["hours"] > 2.0:
+        extra_time = int((data["hours"] - 2.0) * 2) * 25
+        rows.append((f"Extra cleaning time", f"${extra_time:.2f}"))
+        total += extra_time
 
+    # Large items
     if data["large_items"] > 0:
-        charge = data["large_items"] * large_item_charge
-        results.append((f"Large item manipulation (count={data['large_items']})", charge))
-        total += charge
+        large_items_price = data["large_items"] * 25
+        rows.append((f"Large item manipulation (count={data['large_items']})", f"${large_items_price:.2f}"))
+        total += large_items_price
 
-    if data["rug_sqft"] > 0:
-        charge = data["rug_sqft"] * rug_rate
-        results.append((f"Area rug cleaning ({data['rug_sqft']} sq ft × ${rug_rate:.2f})", charge))
-        total += charge
+    # Rugs
+    if data["total_rug_sqft"] > 0:
+        rugs_price = data["total_rug_sqft"] * 4
+        rows.append((f"Area rug cleaning ({data['total_rug_sqft']} sq ft × $4.00)", f"${rugs_price:.2f}"))
+        total += rugs_price
 
+    # Pet treatment
     if data["pet_rooms"] > 0:
-        charge = data["pet_rooms"] * pet_treatment_rate
-        results.append((f"Pet odor treatment ({data['pet_rooms']} rooms × ${pet_treatment_rate:.2f})", charge))
-        total += charge
+        pet_price = data["pet_rooms"] * 75
+        rows.append((f"Pet odor treatment ({data['pet_rooms']} rooms × $75.00)", f"${pet_price:.2f}"))
+        total += pet_price
 
+    # Stain guard
     if data["stain_guard_rooms"] > 0:
-        charge = data["stain_guard_rooms"] * stain_guard_rate
-        results.append((f"Stain guard ({data['stain_guard_rooms']} rooms × ${stain_guard_rate:.2f})", charge))
-        total += charge
+        sg_price = data["stain_guard_rooms"] * 50
+        rows.append((f"Stain guard ({data['stain_guard_rooms']} rooms × $50.00)", f"${sg_price:.2f}"))
+        total += sg_price
 
-    if data["membership"] == "6mo":
-        results.append(("6-Month Membership Program", membership_6mo))
-        total += membership_6mo
-    elif data["membership"] == "1yr":
-        results.append(("1-Year Membership Program", membership_1yr))
-        total += membership_1yr
+    # Membership
+    if data["membership"] == "y":
+        mem_price = 789
+        rows.append(("6-Month Membership Program", f"${mem_price:.2f}"))
+        total += mem_price
+    elif data["membership"] == "a":
+        mem_price = 1479
+        rows.append(("1-Year Membership Program", f"${mem_price:.2f}"))
+        total += mem_price
 
-    bundle_discount = 0
-    if data["sqft"] > 0 and data["rug_sqft"] > 0 and data["stain_guard_rooms"] > 0:
-        bundle_discount = total * bundle_discount_rate
-        results.append((f"Bundle discount ({bundle_discount_rate*100:.0f}% off)", -bundle_discount))
-        total -= bundle_discount
+    # Discounts
+    if data["discount"] > 0:
+        rows.append(("Additional discount", f"$-{data['discount']:.2f}"))
+        total -= data["discount"]
 
-    if data["extra_discount"] > 0:
-        results.append(("Additional discount", -data["extra_discount"]))
-        total -= data["extra_discount"]
+    return rows, total
 
-    return results, total
-
-# -------------------------
+# -----------------------
 # PDF GENERATION
-# -------------------------
-def generate_pdf(client_name, results, total):
-    buffer = BytesIO()
-    p = canvas.Canvas(buffer, pagesize=letter)
-    width, height = letter
-
-    y = height - 50
-    p.setFont("Helvetica-Bold", 16)
-    p.drawString(50, y, f"Carpet Cleaning Quote for {client_name}")
-    y -= 30
-
-    p.setFont("Helvetica", 12)
-    for item, amount in results:
-        p.drawString(50, y, f"{item:<50} ${amount:,.2f}")
+# -----------------------
+def generate_pdf(client_name, rows, total):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=letter)
+    y = 750
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(200, y, f"Carpet Cleaning Quote for {client_name}")
+    y -= 40
+    c.setFont("Helvetica", 12)
+    for item, price in rows:
+        c.drawString(50, y, item)
+        c.drawRightString(550, y, price)
         y -= 20
-
-    p.setFont("Helvetica-Bold", 14)
-    p.drawString(50, y, f"Grand Total: ${total:,.2f}")
-    p.showPage()
-    p.save()
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, y, "Grand Total:")
+    c.drawRightString(550, y, f"${total:.2f}")
+    c.save()
     buffer.seek(0)
     return buffer
 
-# -------------------------
+# -----------------------
 # EMAIL SENDING
-# -------------------------
+# -----------------------
 def send_email_with_attachment(to_email, subject, body, pdf_buffer, filename):
-    smtp_server = os.environ.get("SMTP_SERVER")
-    smtp_port = int(os.environ.get("SMTP_PORT", 587))
-    smtp_username = os.environ.get("SMTP_USERNAME")
-    smtp_password = os.environ.get("SMTP_PASSWORD")
-
-    if not smtp_server or not smtp_username or not smtp_password:
-        return "SMTP settings are not configured."
-
-    msg = MIMEMultipart()
-    msg["From"] = smtp_username
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-
-    part = MIMEApplication(pdf_buffer.read(), Name=filename)
-    part["Content-Disposition"] = f'attachment; filename="{filename}"'
-    msg.attach(part)
-
     try:
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            server.login(smtp_username, smtp_password)
-            server.send_message(msg)
-        return f"Quote emailed to {to_email} successfully."
-    except Exception as e:
-        return f"Failed to send email: {str(e)}"
+        msg = MIMEMultipart()
+        msg["From"] = os.environ.get("SMTP_USERNAME")
+        msg["To"] = to_email
+        msg["Subject"] = subject
 
-# -------------------------
-# FLASK ROUTES
-# -------------------------
-HTML_FORM = """
-<!doctype html>
-<title>Carpet Cleaning Quick Quote</title>
-<h1>Carpet Cleaning Quick Quote</h1>
-<form method="post" action="/quote">
-  Client Name: <input type="text" name="client_name" required><br>
-  Distance (miles): <input type="number" step="0.1" name="miles" required><br>
-  Square footage: <input type="number" step="0.1" name="sqft" required><br>
-  Large items: <input type="number" name="large_items" value="0"><br>
-  Area rug total sq ft: <input type="number" step="0.1" name="rug_sqft" value="0"><br>
-  Pet treatment rooms: <input type="number" name="pet_rooms" value="0"><br>
-  Floors: <input type="number" name="floors" value="1"><br>
-  Extra time (hours): <input type="number" step="0.5" name="extra_time_hours" value="0"><br>
-  Stain guard rooms: <input type="number" name="stain_guard_rooms" value="0"><br>
-  Membership: <select name="membership">
-    <option value="">None</option>
-    <option value="6mo">6 Month</option>
-    <option value="1yr">1 Year</option>
-  </select><br>
-  Extra discount: <input type="number" step="0.01" name="extra_discount" value="0"><br>
-  <button type="submit" name="action" value="show">Show Quote</button>
-  <button type="submit" name="action" value="email">Email PDF</button><br>
-  Recipient Email (for PDF): <input type="email" name="recipient_email"><br>
+        msg.attach(MIMEText(body, "plain"))
+
+        part = MIMEApplication(pdf_buffer.read(), Name=filename)
+        part["Content-Disposition"] = f'attachment; filename="{filename}"'
+        msg.attach(part)
+
+        with smtplib.SMTP(os.environ.get("SMTP_SERVER"), int(os.environ.get("SMTP_PORT"))) as server:
+            server.starttls()
+            server.login(os.environ.get("SMTP_USERNAME"), os.environ.get("SMTP_PASSWORD"))
+            server.send_message(msg)
+        return True, "Email sent successfully."
+    except Exception as e:
+        return False, f"Failed to send email: {e}"
+
+# -----------------------
+# HTML TEMPLATE
+# -----------------------
+form_template = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Carpet Cleaning Quick Quote Calculator</title>
+</head>
+<body>
+<h2>Carpet Cleaning Quick Quote Calculator</h2>
+<form method="POST">
+    Client Name: <input type="text" name="client_name" value="{{ data.client_name }}"><br>
+    Distance (miles): <input type="number" step="0.1" name="miles" value="{{ data.miles }}"><br>
+    Sq Ft: <input type="number" name="sq_ft" value="{{ data.sq_ft }}"><br>
+    Pet treatment rooms: <input type="number" name="pet_rooms" value="{{ data.pet_rooms }}"><br>
+    Large items: <input type="number" name="large_items" value="{{ data.large_items }}"><br>
+    Total Rug Sq Ft: <input type="number" step="0.1" name="total_rug_sqft" value="{{ data.total_rug_sqft }}"><br>
+    Floors: <input type="number" name="floors" value="{{ data.floors }}"><br>
+    Hours: <input type="number" step="0.1" name="hours" value="{{ data.hours }}"><br>
+    Stain Guard Rooms: <input type="number" name="stain_guard_rooms" value="{{ data.stain_guard_rooms }}"><br>
+    Membership (n=none, y=6mo, a=1yr): <input type="text" name="membership" value="{{ data.membership }}"><br>
+    Discount: <input type="number" step="0.01" name="discount" value="{{ data.discount }}"><br>
+    Recipient Email (for PDF): <input type="email" name="recipient_email" value="{{ data.recipient_email }}"><br><br>
+
+    <button type="submit" name="action" value="show">Show Quote</button>
+    <button type="submit" name="action" value="email">Email PDF</button>
+    <button type="submit" name="action" value="clear">Clear</button>
 </form>
-{% if results %}
-<h2>Quote for {{ client_name }}</h2>
-<table border="1" cellpadding="5">
-<tr><th>Item</th><th>Amount</th></tr>
-{% for item, amount in results %}
-<tr><td>{{ item }}</td><td>${{ "%.2f"|format(amount) }}</td></tr>
+
+{% if rows %}
+<h3>Detailed Estimate for {{ data.client_name }}</h3>
+<table border="1" cellpadding="5" cellspacing="0">
+<tr><th>Item</th><th>Price</th></tr>
+{% for item, price in rows %}
+<tr><td>{{ item }}</td><td>{{ price }}</td></tr>
 {% endfor %}
-<tr><td><b>Grand Total</b></td><td><b>${{ "%.2f"|format(total) }}</b></td></tr>
+<tr><th>Grand Total</th><th>${{ "%.2f"|format(total) }}</th></tr>
 </table>
-{% if message %}<p>{{ message }}</p>{% endif %}
 {% endif %}
+
+{% if message %}
+<p>{{ message }}</p>
+{% endif %}
+</body>
+</html>
 """
 
-@app.route("/", methods=["GET"])
-def form():
-    return render_template_string(HTML_FORM)
-
-@app.route("/quote", methods=["POST"])
-def quote():
-    data = {
-        "client_name": request.form.get("client_name"),
-        "miles": float(request.form.get("miles") or 0),
-        "sqft": float(request.form.get("sqft") or 0),
-        "large_items": int(request.form.get("large_items") or 0),
-        "rug_sqft": float(request.form.get("rug_sqft") or 0),
-        "pet_rooms": int(request.form.get("pet_rooms") or 0),
-        "floors": int(request.form.get("floors") or 1),
-        "extra_time_hours": float(request.form.get("extra_time_hours") or 0),
-        "stain_guard_rooms": int(request.form.get("stain_guard_rooms") or 0),
-        "membership": request.form.get("membership"),
-        "extra_discount": float(request.form.get("extra_discount") or 0)
+# -----------------------
+# ROUTES
+# -----------------------
+@app.route("/", methods=["GET", "POST"])
+def home():
+    default_data = {
+        "client_name": "",
+        "miles": "",
+        "sq_ft": "",
+        "pet_rooms": "",
+        "large_items": "",
+        "total_rug_sqft": "",
+        "floors": "",
+        "hours": "",
+        "stain_guard_rooms": "",
+        "membership": "",
+        "discount": "",
+        "recipient_email": ""
     }
 
-    results, total = calculate_quote(data)
-    message = ""
+    if request.method == "POST":
+        action = request.form.get("action")
 
-    if request.form.get("action") == "email":
-        recipient = request.form.get("recipient_email")
-        if recipient:
-            pdf_buffer = generate_pdf(data["client_name"], results, total)
-            message = send_email_with_attachment(
-                recipient,
+        if action == "clear":
+            return render_template_string(form_template, data=default_data, rows=None, total=None, message=None)
+
+        data = {k: request.form.get(k, "") for k in default_data}
+        for key in ["miles", "sq_ft", "pet_rooms", "large_items", "total_rug_sqft", "floors", "hours", "stain_guard_rooms", "discount"]:
+            try:
+                data[key] = float(data[key]) if data[key] else 0
+            except:
+                data[key] = 0
+
+        rows, total = calculate_quote(data)
+
+        if action == "show":
+            return render_template_string(form_template, data=data, rows=rows, total=total, message=None)
+
+        elif action == "email":
+            pdf_buffer = generate_pdf(data["client_name"], rows, total)
+            success, msg = send_email_with_attachment(
+                data["recipient_email"],
                 f"Carpet Cleaning Quote for {data['client_name']}",
-                "Hello,\n\nAttached is your detailed carpet cleaning quote.\n\nThank you.",
+                "Please find attached your carpet cleaning quote.",
                 pdf_buffer,
-                f"Quote_{data['client_name']}.pdf"
+                "quote.pdf"
             )
-        else:
-            message = "Recipient email not provided. PDF not sent."
+            return render_template_string(form_template, data=data, rows=rows, total=total, message=msg)
 
-    return render_template_string(HTML_FORM, results=results, total=total, client_name=data["client_name"], message=message)
+    return render_template_string(form_template, data=default_data, rows=None, total=None, message=None)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
